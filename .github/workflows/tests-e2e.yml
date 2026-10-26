@@ -1,0 +1,167 @@
+name: Tests in Playwright (e2e)
+
+on:
+  push:
+    branches:
+      - master
+      - develop
+  pull_request:
+
+env:
+  # Throwaway credentials for the admin E2eSeeder creates in this job's
+  # SQLite database; nothing outside the job uses them.
+  E2E_ADMIN_USERNAME: e2e-admin
+  E2E_ADMIN_PASSWORD: e2e-ci-password
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version:
+          - "8.5"
+
+    name: PHP ${{ matrix.php-version }}
+
+    steps:
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
+        with:
+          php-version: "${{ matrix.php-version }}"
+          coverage: none
+          ini-values: memory_limit=1G
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: |
+          echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-${{ matrix.php-version }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.php-version }}-composer-
+
+      - name: Copy .env
+        run: cp -v .env.testing.example .env
+
+      - name: Create database file
+        run: touch database/database.sqlite
+
+      - name: Install Dependencies
+        run: composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+
+      - name: Generate key
+        run: php artisan key:generate
+
+      - name: Setup Passport
+        run: php artisan passport:keys
+
+      - name: Directory Permissions
+        run: chmod -R 777 storage bootstrap/cache
+
+      # The settings go in .env, not the job environment, so artisan and the
+      # served app read the same values.
+      #
+      # APP_ENV=production with APP_DEBUG=false, as in the Docker image,
+      # rather than .env.testing.example's testing/debug: with debug on,
+      # laravel-debugbar (installed as a dev dependency here) injects its
+      # toolbar into every page. Neither value changes CSRF or session
+      # handling, which only differ inside PHPUnit.
+      #
+      # APP_URL must be exactly the origin the browser uses: the app forces
+      # its root URL to APP_URL, so redirects and links follow it.
+      - name: Configure the app for serving
+        run: |
+          set_env() {
+            if grep -q "^$1=" .env; then
+              sed -i "s|^$1=.*|$1=$2|" .env
+            else
+              echo "$1=$2" >> .env
+            fi
+          }
+          set_env APP_ENV production
+          set_env APP_DEBUG false
+          set_env APP_URL http://127.0.0.1:8000
+          set_env DB_CONNECTION sqlite
+          set_env DEBUGBAR_ENABLED false
+          set_env MAIL_MAILER log
+          set_env LOG_CHANNEL single
+          set_env LOG_LEVEL debug
+          set_env SESSION_DRIVER file
+          set_env CACHE_DRIVER file
+          set_env QUEUE_CONNECTION sync
+
+      - name: Migrate the database
+        # A testing environment for this command only: outside testing, the
+        # MigrationsEnded listener (RegenerateIdeHelperAfterMigrate) rewrites
+        # the ide-helper model stub whenever the dev dependency is installed.
+        env:
+          APP_ENV: testing
+        run: php artisan migrate --force
+
+      - name: Seed the e2e baseline
+        run: php artisan db:seed --class=E2eSeeder --force
+
+      - name: Start the app
+        env:
+          # Lets a page's parallel /api/v1 calls run side by side; artisan
+          # serve honours it only with --no-reload.
+          PHP_CLI_SERVER_WORKERS: 4
+        run: |
+          nohup php artisan serve --host 127.0.0.1 --port 8000 --no-reload > storage/logs/serve.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:8000/login; then
+              echo "app is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "app did not answer on http://127.0.0.1:8000/login within 120s" >&2
+          cat storage/logs/serve.log >&2
+          exit 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install Playwright
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Execute e2e tests via Playwright
+        working-directory: tests/e2e
+        env:
+          # A fresh value per workflow run: the spec names the asset it creates after it.
+          RUNID: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+        run: npx playwright test
+
+      - name: Upload the Playwright report as an artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-php-${{ matrix.php-version }}-run-${{ github.run_attempt }}
+          path: |
+            tests/e2e/playwright-report
+            tests/e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Laravel logs as artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: laravel-logs-e2e-php-${{ matrix.php-version }}-run-${{ github.run_attempt }}
+          path: |
+            storage/logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7

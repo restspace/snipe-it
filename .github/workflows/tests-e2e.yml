@@ -96,6 +96,10 @@ jobs:
           set_env SESSION_DRIVER file
           set_env CACHE_DRIVER file
           set_env QUEUE_CONNECTION sync
+          # The UI's own pages call /api/v1 (one test run makes about 30
+          # calls), and the default limit of 120 a minute per user is soon
+          # spent once several specs run back to back.
+          set_env API_THROTTLE_PER_MINUTE 10000
 
       - name: Migrate the database
         # A testing environment for this command only: outside testing, the

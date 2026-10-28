@@ -1,4 +1,4 @@
-// Written with sitelooper 0.7.0 from the recorded flow "asset-checkout".
+// Written with sitelooper 0.8.0 from the recorded flow "asset-checkout".
 // Plain @playwright/test with no other dependency: edit it like any other test.
 import { expect, test, type Locator, type Page } from '@playwright/test';
 

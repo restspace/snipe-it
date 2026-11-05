@@ -100,14 +100,13 @@ async function step02Create(page: Page, { vars, outputs }: StepContext): Promise
   await page.locator('input[name="name"]').fill(`${vars.runid} E2E Laptop`);
   // Shows the order fields, which include the purchase date.
   await page.locator('#create-form a:has-text("Order Related Information")').click();
-  console.log('[dbg] before fill', await page.locator('input[name="purchase_date"]').inputValue());
-  await page.locator('input[name="purchase_date"]').fill('2026-03-15');
-  console.log('[dbg] after fill', await page.locator('input[name="purchase_date"]').inputValue());
-  // Closes the date picker the fill opened.
+  // The field opens a date picker on focus, which fills in today's date: open it first, then type over it.
+  const purchaseDate = page.locator('input[name="purchase_date"]');
+  await purchaseDate.click();
+  await purchaseDate.fill('2026-03-15');
+  // Closes the date picker.
   await page.keyboard.press('Escape');
-  console.log('[dbg] after escape', await page.locator('input[name="purchase_date"]').inputValue());
-  await page.waitForTimeout(500);
-  console.log('[dbg] after 500ms', await page.locator('input[name="purchase_date"]').inputValue());
+  await expect(purchaseDate).toHaveValue('2026-03-15');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
   await expect(page).toHaveURL(/\/hardware$/);
   await expect(page.getByText('Asset with tag')).toBeVisible();
